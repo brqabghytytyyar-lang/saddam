@@ -1,0 +1,559 @@
+local _RP, _RW = print, warn
+_G.RyPrivStealWhy = "boot"
+_G.RyPrivStealLog = {}
+_G.RyPrivStealSay = function(msg)
+    -- Fast path for an identical repeat, which is the common case: the steal
+    -- tick reports the same reason on every frame for as long as nothing
+    -- changes ("steal mode OFF", "no target", "cooldown"). Bumping the counter
+    -- is all that is needed, so skip the tostring, the os.clock, the log walk
+    -- and the debug branch. Only a message that actually changed does the
+    -- full path below.
+    if msg == _G.RyPrivStealWhy then
+        local L0 = _G.RyPrivStealLog
+        local last0 = L0[#L0]
+        if last0 then last0.n = last0.n + 1 end
+        return
+    end
+    msg = tostring(msg)
+    _G.RyPrivStealWhy = msg
+    local L = _G.RyPrivStealLog
+    local now = os.clock()
+    local last = L[#L]
+    if last and last.msg == msg then
+        last.n = last.n + 1
+        last.t = now
+    else
+        L[#L + 1] = { msg = msg, t = now, t0 = now, n = 1 }
+        while #L > 8 do table.remove(L, 1) end
+    end
+    if _G.RyPrivStealDebug then
+        if now - (_G._mkLastSay or 0) >= (tonumber(_G.RyPrivStealDebugGap) or 0.5) then
+            _G._mkLastSay = now
+            pcall(_RP, "[steal] " .. msg)
+        end
+    end
+end
+
+_G.RyPrivScanProfile = function(mode)
+    if mode == "fast" then
+        _G.RyPrivScanMode     = "fast"
+        _G.RyPrivPanelScanGap = tonumber(_G.RyPrivFastPanelGap)    or 0.12
+        _G.RyPrivRepickGap    = tonumber(_G.RyPrivFastRepickGap)   or 0.10
+        _G.RyPrivInRangeGap   = tonumber(_G.RyPrivFastInRangeGap)  or 0.10
+        _G.RyPrivWatchdogTick = tonumber(_G.RyPrivFastWatchdogTick) or 0.15
+        _G.RyPrivSyncScanGap  = tonumber(_G.RyPrivFastSyncGap)     or 0.05
+        _G.RyPrivAutoTPPoll   = tonumber(_G.RyPrivFastTPPoll)      or 0.03
+    else
+        _G.RyPrivScanMode     = "normal"
+        _G.RyPrivPanelScanGap = tonumber(_G.RyPrivNormPanelGap)    or 0.6
+        _G.RyPrivRepickGap    = tonumber(_G.RyPrivNormRepickGap)   or 0.5
+        _G.RyPrivInRangeGap   = tonumber(_G.RyPrivNormInRangeGap)  or 0.3
+        _G.RyPrivWatchdogTick = tonumber(_G.RyPrivNormWatchdogTick) or 0.3
+        _G.RyPrivSyncScanGap  = tonumber(_G.RyPrivNormSyncGap)     or 0.25
+        _G.RyPrivAutoTPPoll   = tonumber(_G.RyPrivNormTPPoll)      or 0.05
+    end
+    if _G.RyPrivStealSay then _G.RyPrivStealSay("scan profile -> " .. tostring(_G.RyPrivScanMode)) end
+end
+_G.RyPrivScanProfile("fast")
+task.delay(tonumber(_G.RyPrivFastWindow) or 60, function()
+    if _G.RyPrivScanMode == "fast" then _G.RyPrivScanProfile("normal") end
+end)
+local print = function() end
+local warn  = function() end
+_G.RyPrivInvisAuto = false
+_G.RyPrivAutoKickOnSteal = false
+_G.RyPrivAutoBuy = false
+if _G.RyPrivStealMode == nil then _G.RyPrivStealMode = "priority" end
+-- Teleport movement mode: "normal" is the velocity flight this hub has always
+-- used, "fling" is goonpriv's CFrame-tween drag. Guarded so the loader wins.
+if _G.RyPrivTPMode == nil then _G.RyPrivTPMode = "normal" end
+-- Animations were always suppressed before this was a setting, so the default
+-- keeps that rather than changing how the hub behaves for existing users.
+if _G.RyPrivDisableAnims == nil then _G.RyPrivDisableAnims = true end
+-- ESP defaults. Every one is `== nil` guarded so the settings loader, which
+-- runs after this, keeps whatever was saved.
+if _G.RyPlayerESP       == nil then _G.RyPlayerESP       = false end
+if _G.ESP_Stealer       == nil then _G.ESP_Stealer       = false end
+if _G.ESP_BaseOwner     == nil then _G.ESP_BaseOwner     = false end
+if _G.ESP_Brainrot      == nil then _G.ESP_Brainrot      = false end
+if _G.ESP_Trap          == nil then _G.ESP_Trap          = false end
+-- Turret ESP has no working backend, so the flag stays off permanently and the
+-- hazard pass skips it. There is deliberately no switch for it.
+_G.ESP_Turret = false
+if _G.ESP_MaxDistance   == nil then _G.ESP_MaxDistance   = 700 end
+if _G.ESP_BrainrotTop   == nil then _G.ESP_BrainrotTop   = 5 end
+if _G.ESP_BoxSize       == nil then _G.ESP_BoxSize       = 4.5 end
+if _G.ESP_BoxTransp     == nil then _G.ESP_BoxTransp     = 0.5 end
+-- INSTANT STEAL: the prompt-burst engine ported from the pub method. Off by
+-- default; Base Camp turns it on for you and puts it back off when camp ends.
+if _G.RyPrivInstantSteal == nil then _G.RyPrivInstantSteal = false end
+if _G.RyPrivAutoTP == nil then _G.RyPrivAutoTP = true end
+-- How see-through every panel in the hub is. The Utility panel's Settings
+-- popout drives this, and each panel reads it on its repaint tick.
+if _G.RyPrivAlpha == nil then _G.RyPrivAlpha = 0.12 end
+-- Anti-ragdoll recovery; the Invis panel's AUTO RECOVER row.
+if _G.RyPrivAntiRagdoll == nil then _G.RyPrivAntiRagdoll = true end
+
+-- TP safety: prefer a slightly slower, more stable route over hard misses/deaths.
+if _G.RyPrivTPSafeMode == nil then _G.RyPrivTPSafeMode = true end
+if _G.RyPrivTPSafeSpeed == nil then _G.RyPrivTPSafeSpeed = 300 end
+if _G.RyPrivTPSafeVerticalSpeed == nil then _G.RyPrivTPSafeVerticalSpeed = 110 end
+if _G.RyPrivTPReachTolerance == nil then _G.RyPrivTPReachTolerance = 4.5 end
+if _G.RyPrivTPRetryCount == nil then _G.RyPrivTPRetryCount = 2 end
+if _G.RyPrivTPRetryDelay == nil then _G.RyPrivTPRetryDelay = 0.08 end
+if _G.RyPrivVoidRecover == nil then _G.RyPrivVoidRecover = true end
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+--[[ Net env-spoof: DISABLED ----------------------------------------------------
+     This used to require ReplicatedStorage.Packages.Net and then write into the
+     game module's own environment:
+         env.getfenv                  = <our function>
+         setreadonly(env.debug, false)
+         env.debug.getmemorycategory  = function() return "--" end
+     re-applied 80x over 8 seconds.
+
+     That is the loudest signal in this script, and it is self-defeating. The
+     Net wrapper calls debug.getmemorycategory() to identify its caller. Legit
+     game code returns a real script category; this returned the literal "--",
+     which is not a valid category -- so anything validating the returned value
+     against a known set sees "--" and flags immediately. Leaving env.debug
+     writable via setreadonly is independently checkable (table.isfrozen).
+
+     RyPriv doesn't need it: the grapple now resolves the UseItem
+     RemoteEvent structurally and calls FireServer on the raw Instance, which
+     never enters the Net wrapper.
+
+     Set _G.RyPrivNetSpoofEnable = true to restore the old behaviour.
+--------------------------------------------------------------------------- ]]
+do
+    local RS = game:GetService("ReplicatedStorage")
+    local _spoofOk = false
+    local function _applySpoof()
+        if _G.RyPrivNetSpoofEnable ~= true then return false end
+        local ok = pcall(function()
+            local Net = require(RS:WaitForChild("Packages"):WaitForChild("Net"))
+            local og = getfenv
+            if type(og) ~= "function" then return end
+            for _, fname in ipairs({ "RemoteEvent", "RemoteFunction", "UnreliableRemoteEvent" }) do
+                local f = rawget(Net, fname)
+                if type(f) == "function" then
+                    local env = og(f)
+                    if type(env) == "table" then
+                        env.getfenv = function() return og(f) end
+                        if type(env.debug) == "table" then
+                            if setreadonly then pcall(setreadonly, env.debug, false) end
+                            env.debug.getmemorycategory = function() return "--" end
+                        end
+                    end
+                end
+            end
+            _spoofOk = true
+        end)
+        return ok and _spoofOk
+    end
+    _G.RyPrivNetSpoof = _applySpoof
+    _G.RyPrivNetSpoofReady = function() return _spoofOk end
+    if _G.RyPrivNetSpoofEnable == true then
+        _applySpoof()
+        task.spawn(function()
+            for _ = 1, 80 do
+                if _applySpoof() then end
+                task.wait(0.1)
+            end
+        end)
+    end
+end
+
+pcall(function() if setfpscap then setfpscap(9999) end end)
+
+
+task.spawn(function()
+    local Workspace = game:GetService("Workspace")
+    local LocalPlayer = game:GetService("Players").LocalPlayer
+    if not Workspace.StreamingEnabled then return end
+    local plots
+    local t0 = os.clock()
+    repeat plots = Workspace:FindFirstChild("Plots"); if not plots then task.wait(0.1) end
+    until plots or (os.clock() - t0) > 25
+    if not plots then return end
+    local function plotPos(plot)
+        local ok, pv = pcall(function() return plot:GetPivot().Position end)
+        if ok and pv and pv.Magnitude > 1 then return pv end
+        if plot.PrimaryPart then return plot.PrimaryPart.Position end
+        local bp = plot:FindFirstChildWhichIsA("BasePart", true)
+        return bp and bp.Position or nil
+    end
+    local pending = 0
+    for _, plot in ipairs(plots:GetChildren()) do
+        local pos = plotPos(plot)
+        if pos then
+            pending = pending + 1
+            task.spawn(function()
+                pcall(function() LocalPlayer:RequestStreamAroundAsync(pos) end)
+                pending = pending - 1
+            end)
+        end
+    end
+    local sw = os.clock()
+    while pending > 0 and os.clock() - sw < 10 do task.wait(0.05) end
+end)
+
+_G.RyPrivBootDelay = tonumber(_G.RyPrivBootDelay) or 6
+if _G.RyPrivWaitForTools == nil then _G.RyPrivWaitForTools = true end
+_G.RyPrivToolWait = tonumber(_G.RyPrivToolWait) or 35
+do
+    local _bootT0 = os.clock()
+    local _BOOT_TOOLS = {
+        "Flying Carpet", "Waverider", "Santa's Sleigh", "Witch's Broom", "Cupid's Wings",
+        "Grapple Hook", "Grappling Hook", "Grapple", "Hook", "Web Slinger", "Grapple Gun", "GrappleHook",
+    }
+    local function _hasTool(n)
+        local plr = game:GetService("Players").LocalPlayer
+        if not plr then return false end
+        local char = plr.Character
+        local bp = plr:FindFirstChild("Backpack")
+        local t = (char and char:FindFirstChild(n)) or (bp and bp:FindFirstChild(n))
+        return t ~= nil and t:IsA("Tool")
+    end
+    local function _toolsReady()
+        if type(_G.RyPrivCarpetTool) == "string" and _G.RyPrivCarpetTool ~= "" and _hasTool(_G.RyPrivCarpetTool) then return true end
+        for _, n in ipairs(_BOOT_TOOLS) do
+            if _hasTool(n) then return true end
+        end
+        return false
+    end
+    _G.RyPrivToolsReady = _toolsReady
+    _G.RyPrivBootWait = function()
+        local d = tonumber(_G.RyPrivBootDelay) or 8
+        while os.clock() - _bootT0 < d do task.wait(0.25) end
+        if _G.RyPrivWaitForTools == false then return end
+        local cap = tonumber(_G.RyPrivToolWait) or 30
+        local t0 = os.clock()
+        while os.clock() - t0 < cap do
+            local ok, ready = pcall(_toolsReady)
+            if ok and ready then
+                task.wait(0.35)
+                return
+            end
+            task.wait(0.2)
+        end
+        warn("[Rymogs priv] tools never loaded within " .. cap .. "s, continuing anyway")
+    end
+
+    -- ── UI GATE ──────────────────────────────────────────────────────────
+    -- Panels do not need a finished world or a loaded backpack to be drawn --
+    -- only the engines do. Several windows were gated on RyPrivBootWait, so
+    -- they sat invisible for the whole 6s boot delay plus however long the
+    -- tool wait took, which is why parts of the hub turned up seconds after
+    -- the rest. All a panel actually needs is somewhere to parent itself.
+    _G.RyPrivUIWait = function()
+        local plr = game:GetService("Players").LocalPlayer
+        if not plr then return end
+        if plr:FindFirstChildOfClass("PlayerGui") then return end
+        local t0 = os.clock()
+        while not plr:FindFirstChildOfClass("PlayerGui") and os.clock() - t0 < 10 do
+            task.wait(0.05)
+        end
+    end
+end
+
+_G.RyPrivPriVersion = _G.RyPrivPriVersion or 0
+if type(_G.RyPrivPriorityDefault) ~= "table" then _G.RyPrivPriorityDefault = {} end
+if type(_G.SHARED_PRIORITY_ITEMS) ~= "table" then _G.SHARED_PRIORITY_ITEMS = {} end
+
+if LPH_OBFUSCATED == nil then
+    local env = getfenv()
+    env["LPH_NO_" .. "VIRTUALIZE"] = function(...) return ... end
+    env["LPH_JIT_" .. "MAX"]       = function(...) return ... end
+end
+
+do
+    local _HS = game:GetService("HttpService")
+    local _TS = game:GetService("TeleportService")
+    local fileData, tpData
+    if readfile then
+        -- A pcall here stops a malformed file crashing the load, but it also
+        -- meant every setting silently reverted to defaults and the next save
+        -- overwrote the file, so whatever was in it was gone for good. Keep a
+        -- copy instead: the individual reads below are each type-guarded, so a
+        -- single bad VALUE already cannot take the others down with it -- this
+        -- covers the file being unparseable as a whole.
+        local raw
+        pcall(function() raw = readfile("SideTP.json") end)
+        if type(raw) == "string" and #raw > 0 then
+            local ok, decoded = pcall(function() return _HS:JSONDecode(raw) end)
+            if ok and type(decoded) == "table" then
+                fileData = decoded
+            elseif writefile then
+                pcall(function() writefile("SideTP.bad.json", raw) end)
+            end
+        end
+    end
+    pcall(function()
+        local td = _TS:GetLocalPlayerTeleportData()
+        if td and td.SideTP then tpData = td.SideTP end
+    end)
+    local merged = {}
+    if type(tpData) == "table" then for k, v in pairs(tpData) do merged[k] = v end end
+    if type(fileData) == "table" then for k, v in pairs(fileData) do merged[k] = v end end
+
+    if type(merged.tpDelay) == "number" then _G._stp_tpDelay = merged.tpDelay end
+    if type(merged.tpVelocity) == "number" then _G.TPVelocity = math.clamp(merged.tpVelocity, 200, 750) end
+    if type(merged.climbSpeed) == "number" then _G.RyPrivClimb = math.clamp(merged.climbSpeed, 100, 250) end
+    if type(merged.cframeSpeed) == "number" then _G.RyPrivCFrameSpeed = math.clamp(merged.cframeSpeed, 100, 900) end
+    -- 5..64 is what the walkspeed engine clamps to and what the Invis panel's
+    -- slider offers. The old 32 ceiling was a limit of the CFrame-stepping
+    -- engine, not of the game; the velocity engine backs itself off instead.
+    if type(merged.walkSpeed) == "number" then _G.RyPrivWalkSpeed = math.clamp(merged.walkSpeed, 5, 64) end
+    if type(merged.carpetTool) == "string" then _G.RyPrivCarpetTool = merged.carpetTool end
+    if type(merged.landingDelay) == "number" then _G.LandingDelay = math.clamp(merged.landingDelay, 0.05, 0.75) end
+    if type(merged.closeSpeed) == "number" then _G.RyPrivCloseSpeed = math.clamp(merged.closeSpeed, 20, 400) end
+    if type(merged.tpSafeMode) == "boolean" then _G.RyPrivTPSafeMode = merged.tpSafeMode end
+    if type(merged.tpSafeSpeed) == "number" then _G.RyPrivTPSafeSpeed = math.clamp(merged.tpSafeSpeed, 180, 400) end
+    if type(merged.tpSafeVerticalSpeed) == "number" then _G.RyPrivTPSafeVerticalSpeed = math.clamp(merged.tpSafeVerticalSpeed, 60, 160) end
+    if type(merged.tpRetryCount) == "number" then _G.RyPrivTPRetryCount = math.clamp(merged.tpRetryCount, 0, 4) end
+    if type(merged.tpKey) == "string" then _G._stp_tpKeyName = merged.tpKey end
+    if type(merged.nearestKey) == "string" then _G.RyPrivNearestKey = merged.nearestKey end
+    if type(merged.prioritySoundID) == "string" then _G.RyPrivPrioritySoundID = merged.prioritySoundID end
+    -- This forced "priority" on every load, so the Steal Nearest / Steal
+    -- Priority switches were saved and then thrown away at startup. Honour
+    -- what was saved; fall back to priority only when there is nothing.
+    if merged.stealMode == "nearest" or merged.stealMode == "priority" then
+        _G.RyPrivStealMode = merged.stealMode
+    elseif _G.RyPrivStealMode == nil then
+        _G.RyPrivStealMode = "priority"
+    end
+    if type(merged.disableAnims) == "boolean" then _G.RyPrivDisableAnims = merged.disableAnims end
+    if merged.tpMode == "fling" or merged.tpMode == "normal" then
+        _G.RyPrivTPMode = merged.tpMode
+    end
+    if type(merged.instantSteal) == "boolean" then _G.RyPrivInstantSteal = merged.instantSteal end
+    if type(merged.instantKey)   == "string"  then _G.RyPrivInstantKeyName = merged.instantKey end
+    _G._stealUserOff = false
+    if type(merged.priorityList) == "table" then
+        local clean = {}
+        for _, v in ipairs(merged.priorityList) do
+            if type(v) == "string" and v ~= "" then clean[#clean + 1] = v end
+        end
+        if #clean > 0 then
+            local L = _G.SHARED_PRIORITY_ITEMS
+            table.clear(L)
+            for i = 1, #clean do L[i] = clean[i] end
+            _G.RyPrivPriVersion = _G.RyPrivPriVersion + 1
+        end
+    end
+    if type(merged.priorityDefault) == "table" then
+        local d = {}
+        for _, v in ipairs(merged.priorityDefault) do
+            if type(v) == "string" and v ~= "" then d[#d + 1] = v end
+        end
+        if #d > 0 then _G.RyPrivPriorityDefault = d end
+    end
+    if type(merged.invisAuto) == "boolean" then _G.RyPrivInvisAuto = merged.invisAuto end
+    if type(merged.invisDepth) == "number" then _G.RyPrivInvisDepth = math.clamp(merged.invisDepth, 0, 15) end
+    if type(merged.dropView) == "boolean" then _G.RyPrivDropView = merged.dropView end
+    if type(merged.invisAngle) == "number" then _G.RyPrivInvisAngle = math.clamp(merged.invisAngle, 0, 360) end
+    if type(merged.autoTp) == "boolean" then _G.RyPrivAutoTP = merged.autoTp end
+    if type(merged.autoBuy) == "boolean" then _G.RyPrivAutoBuy = merged.autoBuy end
+    if type(merged.autoBuyRange) == "number" then _G.RyPrivAutoBuyRange = math.clamp(merged.autoBuyRange, 5, 40) end
+    if type(merged.autoBuyHover) == "number" then _G.RyPrivAutoBuyHover = math.clamp(merged.autoBuyHover, 0, 20) end
+    if type(merged.tgtX) == "number" then _G._ryPriv_tgtX = merged.tgtX end
+    if type(merged.tgtY) == "number" then _G._ryPriv_tgtY = merged.tgtY end
+    if type(merged.tgtW) == "number" then _G._ryPriv_tgtW = merged.tgtW end
+    if type(merged.adW)  == "number" then _G._ryPriv_adW  = merged.adW  end
+    if type(merged.adH)  == "number" then _G._ryPriv_adH  = merged.adH  end
+    if type(merged.autoKickOnSteal) == "boolean" then _G.RyPrivAutoKickOnSteal     = merged.autoKickOnSteal end
+    if type(merged.resetKey)        == "string"  then _G.RyPrivResetKeyName        = merged.resetKey end
+    if type(merged.cloneKey)        == "string"  then _G.RyPrivCloneKeyName        = merged.cloneKey end
+    if type(merged.carpetSpeedKey)  == "string"  then _G.RyPrivCarpetSpeedKeyName  = merged.carpetSpeedKey end
+    if type(merged.kickKey)         == "string"  then _G.RyPrivKickKeyName         = merged.kickKey end
+    if type(merged.stopTpKey)       == "string"  then _G.RyPrivStopTPKeyName       = merged.stopTpKey end
+    if type(merged.dropKey)         == "string"  then _G.RyPrivDropKeyName         = merged.dropKey end
+    if type(merged.goSpeed)      == "number"  then _G.RyPrivGoSpeed            = math.clamp(merged.goSpeed, 80, 600) end
+    if type(merged.kickToPS)     == "boolean" then _G.RyPrivKickToPS           = merged.kickToPS end
+    if type(merged.psLink)       == "string"  then _G.RyPrivPrivateServerLink  = merged.psLink end
+    if type(merged.priAlert)     == "boolean" then _G.RyPrivPriAlert           = merged.priAlert end
+    if type(merged.alertSound)   == "string"  then _G.RyPrivAlertSound         = merged.alertSound end
+    if type(merged.alertMinGen)  == "number"  then _G.RyPrivAlertMinGen        = merged.alertMinGen end
+    if type(merged.walkSpeedOn)  == "boolean" then _G.RyPrivWalkSpeedOn        = merged.walkSpeedOn end
+    if type(merged.xray)         == "boolean" then _G.RyPrivXray               = merged.xray end
+    if type(merged.espPlayer)    == "boolean" then _G.RyPlayerESP      = merged.espPlayer end
+    if type(merged.espStealer)   == "boolean" then _G.ESP_Stealer      = merged.espStealer end
+    if type(merged.espBaseOwner) == "boolean" then _G.ESP_BaseOwner    = merged.espBaseOwner end
+    if type(merged.espBrainrot)  == "boolean" then _G.ESP_Brainrot     = merged.espBrainrot end
+    if type(merged.espBox)       == "boolean" then _G.ESP_BrainrotBox  = merged.espBox end
+    if type(merged.espTrap)      == "boolean" then _G.ESP_Trap         = merged.espTrap end
+    if type(merged.espDist)      == "number"  then _G.ESP_MaxDistance  = math.clamp(merged.espDist, 100, 2000) end
+    if type(merged.espTop)       == "number"  then _G.ESP_BrainrotTop  = math.clamp(merged.espTop, 1, 15) end
+    if type(merged.espBoxSize)   == "number"  then _G.ESP_BoxSize      = math.clamp(merged.espBoxSize, 2, 10) end
+    if type(merged.espBoxTransp) == "number"  then _G.ESP_BoxTransp    = math.clamp(merged.espBoxTransp, 0, 0.9) end
+    if type(merged.antiFlash)    == "boolean" then _G.RyPrivAntiFlash          = merged.antiFlash end
+    if type(merged.antiRagdoll)  == "boolean" then _G.RyPrivAntiRagdoll        = merged.antiRagdoll end
+    if type(merged.uiAlpha)      == "number"  then _G.RyPrivAlpha              = math.clamp(merged.uiAlpha, 0, 0.9) end
+    if type(merged.faceAway)        == "boolean" then _G.RyPrivFaceAway        = merged.faceAway end
+    if type(merged.faceAwayNearest) == "boolean" then _G.RyPrivFaceAwayNearest = merged.faceAwayNearest end
+    if type(merged.faceAwayDelay)   == "number"  then _G.RyPrivFaceAwayDelay   = merged.faceAwayDelay end
+    if type(merged.antiBee)      == "boolean" then _G.RyPrivAntiBee            = merged.antiBee end
+    if type(merged.infJump)      == "boolean" then _G.RyPrivInfJump            = merged.infJump end
+    if type(merged.antiDie)      == "boolean" then _G.AntiDieDisabled          = not merged.antiDie end
+    if type(merged.carpetSpeedValue) == "number" then _G.RyPrivCarpetSpeedValue = merged.carpetSpeedValue end
+    if type(merged.sbX) == "number" then _G._ryPriv_sbX = merged.sbX end
+    if type(merged.sbY) == "number" then _G._ryPriv_sbY = merged.sbY end
+    if type(merged.hdrX) == "number" then _G._ryPriv_hdrX = merged.hdrX end
+    if type(merged.hdrY) == "number" then _G._ryPriv_hdrY = merged.hdrY end
+    if type(merged.utX) == "number" then _G._ryPriv_utX = merged.utX end
+    if type(merged.utY) == "number" then _G._ryPriv_utY = merged.utY end
+    if type(merged.ivX) == "number" then _G._ryPriv_ivX = merged.ivX end
+    if type(merged.mbX) == "number" then _G._ryPriv_mbX = merged.mbX end
+    if type(merged.mbY) == "number" then _G._ryPriv_mbY = merged.mbY end
+    if type(merged.ivY) == "number" then _G._ryPriv_ivY = merged.ivY end
+    if type(merged.utilKey) == "string" then _G.RyPrivUtilKeyName       = merged.utilKey end
+    if type(merged.invKey)  == "string" then _G.RyPrivInvisPanelKeyName = merged.invKey  end
+    if type(merged.adminKey) == "string" then _G.RyPrivAdminKeyName = merged.adminKey end
+    if type(merged.adX) == "number" then _G._ryPriv_adX = merged.adX end
+    if type(merged.adY) == "number" then _G._ryPriv_adY = merged.adY end
+    if type(merged.apX) == "number" then _G._ryPriv_apX = merged.apX end
+    if type(merged.apY) == "number" then _G._ryPriv_apY = merged.apY end
+    if type(merged.exX) == "number" then _G._ryPriv_exX = merged.exX end
+    if type(merged.exY) == "number" then _G._ryPriv_exY = merged.exY end
+    if type(merged.autoTpKey)  == "string" then _G.RyPrivAutoTPKeyName      = merged.autoTpKey  end
+    if type(merged.autoBuyKey) == "string" then _G.RyPrivAutoBuyKeyName     = merged.autoBuyKey end
+    if type(merged.cloneNowKey)== "string" then _G.RyPrivCloneNowKey        = merged.cloneNowKey end
+    if type(merged.carpetKey)  == "string" then _G.RyPrivCarpetSpeedKeyName = merged.carpetKey  end
+    if type(merged.uiHidden)   == "table"  then _G.RyPrivUIHidden           = merged.uiHidden   end
+
+    -- This used to force autoTp on and rewrite the file with autoTp = true, so
+    -- the AUTO TP switch came back on every launch no matter what was saved.
+    -- merged.autoTp above already applied the saved value; only fill in a
+    -- default when the file had nothing to say.
+    if _G.RyPrivAutoTP == nil then _G.RyPrivAutoTP = true end
+end
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local RS         = game:GetService("ReplicatedStorage")
+
+local LP = Players.LocalPlayer
+
+-- ════════════════════════════════════════════════════════════════════════
+-- PANEL POSITION + DRAG  (one implementation, shared by every panel)
+-- ════════════════════════════════════════════════════════════════════════
+-- There used to be five separate drag blocks plus one shared helper, each a
+-- copy of the same logic carrying the same faults:
+--   * a permanent UIS.InputChanged connection per panel, never disconnected,
+--     so rebuilding a panel stacked another one and they fought each other
+--   * a fresh InputObject.Changed connection on every mouse press
+--   * release was only noticed through that per-press connection, so letting
+--     go outside the panel could leave a drag running
+--   * no clamping, so a panel saved on a wide monitor came back off-screen
+--   * one of them (the target panel) never called RyPrivSaveSettings at all,
+--     so its position was written to _G and then lost on reload
+--
+-- Positions keep the _G names the settings file already uses (_ryPriv_utX,
+-- _ryPriv_adY and so on) so configs saved by earlier versions still load.
+--
+--   RyPrivApplyPos(frame, keyX, keyY, fallback, opts)  restore, clamped
+--   RyPrivPanelDrag(frame, handle, keyX, keyY, opts)   drag, save on release
+--
+-- opts.keepScale  the frame is positioned partly by scale (the steal bar sits
+--                 at 0.5 scale and only its offset is saved); the scale
+--                 components are preserved and the clamp works on the
+--                 resulting absolute position
+-- opts.pinAnchor  a frame that starts centred on the screen; the first drag
+--                 converts it to a plain top-left position so it stops
+--                 tracking the centre
+do
+    -- The one drag in flight, if any. Everything below reads this rather than
+    -- each panel owning its own input plumbing.
+    local active = nil
+
+    local function viewport()
+        local cam = workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize
+        if vp and vp.X > 1 and vp.Y > 1 then return vp end
+        return nil
+    end
+
+    -- Keep a restored position reachable. A panel saved at x=1800 on a wide
+    -- monitor must not come back entirely outside a 1280-wide one, and a
+    -- negative y must not put the drag handle above the top edge.
+    local function clampAbs(x, y, frame)
+        local vp = viewport()
+        if not vp then return x, y end
+        local sz = frame.AbsoluteSize
+        local w = (sz and sz.X > 0) and sz.X or 200
+        local h = (sz and sz.Y > 0) and sz.Y or 40
+        local keep = 48            -- how much of the panel must stay on screen
+        x = math.clamp(x, -(w - math.min(w, keep)), vp.X - math.min(w, keep))
+        y = math.clamp(y, 0, math.max(0, vp.Y - math.min(h, keep)))
+        return math.floor(x + 0.5), math.floor(y + 0.5)
+    end
+
+    -- Restore a saved position, or leave the fallback in place when there is
+    -- nothing saved. Returns true when a saved position was applied, which the
+    -- status HUD uses to decide whether it is still centre-anchored.
+    _G.RyPrivApplyPos = function(frame, keyX, keyY, fallback, opts)
+        if not frame then return false end
+        opts = opts or {}
+        local sx, sy = tonumber(_G[keyX]), tonumber(_G[keyY])
+        if sx == nil or sy == nil then
+            if fallback then frame.Position = fallback end
+            return false
+        end
+        if opts.pinAnchor then frame.AnchorPoint = Vector2.new(0, 0) end
+
+        local function place()
+            local p = frame.Position
+            local scx = opts.keepScale and p.X.Scale or 0
+            local scy = opts.keepScale and p.Y.Scale or 0
+            local vp = viewport()
+            local offX = vp and scx * vp.X or 0
+            local offY = vp and scy * vp.Y or 0
+            -- clamp where the frame actually lands, then back the offset out
+            local ax, ay = clampAbs(sx + offX, sy + offY, frame)
+            frame.Position = UDim2.new(scx, math.floor(ax - offX + 0.5),
+                                       scy, math.floor(ay - offY + 0.5))
+        end
+        place()
+        -- AbsoluteSize is zero until the frame has been rendered once, so the
+        -- first clamp is working from a guess. Re-clamp once it is real.
+        task.defer(function() if frame.Parent then pcall(place) end end)
+        return true
+    end
+
+    -- Weak keys: when a panel is destroyed its handle goes with it and the
+    -- entry disappears rather than pinning the instance in memory.
+    local regs = setmetatable({}, { __mode = "k" })
+
+    _G.RyPrivPanelDrag = function(frame, handle, keyX, keyY, opts)
+        if not (frame and handle and keyX and keyY) then return end
+        opts = opts or {}
+
+        -- Rebuilding a panel would otherwise leave the previous handlers
+        -- attached to the old handle and add a second set to the new one.
+        local prev = regs[handle]
+        if prev then
+            for _, c in ipairs(prev) do pcall(function() c:Disconnect() end) end
+        end
+        local conns = {}
+        regs[handle] = conns
+
+        conns[#conns + 1] = handle.InputBegan:Connect(function(i)
+            if i.UserInputType ~= Enum.UserInputType.MouseButton1
+                and i.UserInputType ~= Enum.UserInputType.Touch then return end
+            if opts.pinAnchor and frame.AnchorPoint.X ~= 0 then
+                -- first drag pins it, so it stops tracking the screen centre
+                frame.Position = UDim2.fromOffset(frame.AbsolutePosition.X,
+                                                  frame.AbsolutePosition.Y)
+                frame.AnchorPoint = Vector2.new(0, 0)
+            end
+            -- base is captured at the press, so the panel does not jump to the
+            -- cursor: every move is an offset from where it already was
+            active = {
+                frame = frame, handle = handle, opts = opts,
+                keyX = keyX, keyY = keyY,
+                from = i.Position, base = frame.Position, tracked = nil,
+            }
+        end)
